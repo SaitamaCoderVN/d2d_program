@@ -33,14 +33,15 @@ pub struct ConfirmDeployment<'info> {
     #[account(mut)]
     pub developer_wallet: UncheckedAccount<'info>,
     
-    /// CHECK: Platform Pool PDA (recovered funds go here)
-    /// Note: ADMIN_POOL_SEED maps to platform_pool for backward compatibility
+    /// CHECK: Treasury Pool PDA (for recovered funds transfer)
+    /// Note: Recovered funds go back to TreasuryPool, not PlatformPool
+    /// PlatformPool only receives 0.1% developer fees
     #[account(
         mut,
-        seeds = [TreasuryPool::PLATFORM_POOL_SEED],
-        bump = treasury_pool.platform_pool_bump
+        seeds = [TreasuryPool::PREFIX_SEED],
+        bump = treasury_pool.bump
     )]
-    pub admin_pool: UncheckedAccount<'info>,
+    pub treasury_pda: UncheckedAccount<'info>,
     
     /// CHECK: Reward Pool PDA (for refunds on failure)
     #[account(
@@ -60,7 +61,7 @@ pub fn confirm_deployment_success(
     recovered_funds: u64,
 ) -> Result<()> {
     // Get account infos before mutable borrows
-    let admin_pool_info = ctx.accounts.admin_pool.to_account_info();
+    let treasury_pda_info = ctx.accounts.treasury_pda.to_account_info();
     let ephemeral_key_info = ctx.accounts.ephemeral_key.to_account_info();
     
     let treasury_pool = &mut ctx.accounts.treasury_pool;
@@ -108,12 +109,14 @@ pub fn confirm_deployment_success(
     };
 
     if actual_recovered > 0 {
-        // Transfer recovered funds back to Platform Pool via lamport mutation
+        // Transfer recovered funds back to Treasury Pool PDA via lamport mutation
+        // CRITICAL: Recovered funds go to TreasuryPool (liquid_balance), NOT PlatformPool
+        // PlatformPool only receives 0.1% developer fees, not operational funds
         {
-            let mut admin_pool_lamports = admin_pool_info.try_borrow_mut_lamports()?;
+            let mut treasury_lamports = treasury_pda_info.try_borrow_mut_lamports()?;
             let mut ephemeral_lamports = ephemeral_key_info.try_borrow_mut_lamports()?;
 
-            **admin_pool_lamports = (**admin_pool_lamports)
+            **treasury_lamports = (**treasury_lamports)
                 .checked_add(actual_recovered)
                 .ok_or(ErrorCode::CalculationOverflow)?;
             **ephemeral_lamports = (**ephemeral_lamports)
@@ -122,16 +125,14 @@ pub fn confirm_deployment_success(
         }
 
         // Update liquid_balance (recovered funds are available for withdrawals)
+        // This is the correct place for recovered deployment funds
         treasury_pool.liquid_balance = treasury_pool
             .liquid_balance
             .checked_add(actual_recovered)
             .ok_or(ErrorCode::CalculationOverflow)?;
         
-        // Update platform pool balance (recovered funds go to platform pool)
-        treasury_pool.platform_pool_balance = treasury_pool
-            .platform_pool_balance
-            .checked_add(actual_recovered)
-            .ok_or(ErrorCode::CalculationOverflow)?;
+        // NOTE: Do NOT update platform_pool_balance
+        // PlatformPool only receives 0.1% developer fees, not recovered deployment funds
     }
 
     emit!(DeploymentConfirmed {
@@ -152,7 +153,7 @@ pub fn confirm_deployment_failure(
     failure_reason: String,
 ) -> Result<()> {
     let reward_pool_info = ctx.accounts.reward_pool.to_account_info();
-    let admin_pool_info = ctx.accounts.admin_pool.to_account_info();
+    let treasury_pda_info = ctx.accounts.treasury_pda.to_account_info();
     let ephemeral_key_info = ctx.accounts.ephemeral_key.to_account_info();
     
     let treasury_pool = &mut ctx.accounts.treasury_pool;
@@ -206,29 +207,28 @@ pub fn confirm_deployment_failure(
  
     // Return deployment cost to liquid_balance (where it came from)
     // Recovered funds increase liquid_balance for withdrawals
+    // CRITICAL: Recovered funds go to TreasuryPool, NOT PlatformPool
     let remaining_funds = ephemeral_key_info.lamports();
     if remaining_funds > 0 {
         {
-            let mut admin_pool_lamports = admin_pool_info.try_borrow_mut_lamports()?;
+            let mut treasury_lamports = treasury_pda_info.try_borrow_mut_lamports()?;
             let mut ephemeral_lamports = ephemeral_key_info.try_borrow_mut_lamports()?;
             
-            **admin_pool_lamports = (**admin_pool_lamports)
+            **treasury_lamports = (**treasury_lamports)
                 .checked_add(remaining_funds)
                 .ok_or(ErrorCode::CalculationOverflow)?;
             **ephemeral_lamports = 0; // Empty ephemeral key
         }
         
         // Update liquid_balance (recovered funds available for withdrawals)
+        // This is the correct place for recovered deployment funds
         treasury_pool.liquid_balance = treasury_pool
             .liquid_balance
             .checked_add(remaining_funds)
             .ok_or(ErrorCode::CalculationOverflow)?;
         
-        // Update platform pool balance
-        treasury_pool.platform_pool_balance = treasury_pool
-            .platform_pool_balance
-            .checked_add(remaining_funds)
-            .ok_or(ErrorCode::CalculationOverflow)?;
+        // NOTE: Do NOT update platform_pool_balance
+        // PlatformPool only receives 0.1% developer fees, not recovered deployment funds
     }
 
     // IMPORTANT: Refund fees collected (decrease reward_pool_balance)

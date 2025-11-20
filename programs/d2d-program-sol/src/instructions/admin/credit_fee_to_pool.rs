@@ -45,8 +45,14 @@ pub struct CreditFeeToPool<'info> {
 /// Credit fees to pools and update reward_per_share
 /// 
 /// Flow:
-/// 1. Transfer fees from admin/source to pools
-/// 2. Call treasury_pool.credit_fee_to_pool() which updates reward_per_share
+/// 1. Developer has already transferred fees to RewardPool and PlatformPool PDAs (off-chain)
+/// 2. Admin calls this instruction to "record" the fees in on-chain state
+/// 3. Transfer fees from admin to pools (if not already transferred)
+/// 4. Call treasury_pool.credit_fee_to_pool() which updates reward_per_share
+/// 
+/// NOTE: This instruction does NOT transfer funds - it only updates accounting state.
+/// The actual funds should already be in the pool PDAs from developer payment.
+/// This updates reward_per_share accumulator for reward distribution.
 pub fn credit_fee_to_pool(
     ctx: Context<CreditFeeToPool>,
     fee_reward: u64,

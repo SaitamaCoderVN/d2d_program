@@ -19,13 +19,21 @@ pub struct CreateDeployRequest<'info> {
     )]
     pub treasury_pool: Account<'info, TreasuryPool>,
     
-    /// CHECK: Reward Pool PDA (program-owned, receives developer fees)
+    /// CHECK: Reward Pool PDA (program-owned, receives monthly fee: 1% of borrowed amount)
     #[account(
         mut,
         seeds = [TreasuryPool::REWARD_POOL_SEED],
         bump = treasury_pool.reward_pool_bump
     )]
     pub reward_pool: UncheckedAccount<'info>,
+    
+    /// CHECK: Platform Pool PDA (program-owned, receives platform fee: 0.1% of borrowed amount)
+    #[account(
+        mut,
+        seeds = [TreasuryPool::PLATFORM_POOL_SEED],
+        bump = treasury_pool.platform_pool_bump
+    )]
+    pub platform_pool: UncheckedAccount<'info>,
     
     /// CHECK: Deploy Request PDA - will be initialized/resized if needed
     /// We use UncheckedAccount to handle old layouts, then manually deserialize/resize
@@ -178,9 +186,21 @@ pub fn create_deploy_request(
         user_stats.last_reset = current_time;
     }
 
-    // Calculate total payment (service fee + subscription)
-    let total_payment = service_fee
-        .checked_add(monthly_fee.checked_mul(initial_months as u64).ok_or(ErrorCode::CalculationOverflow)?)
+    // Calculate total payment and fee breakdown
+    // Payment structure:
+    // - monthlyFee (1% monthly) + serviceFee → RewardPool
+    // - deploymentPlatformFee (0.1% platform) → PlatformPool
+    let monthly_fee_total = monthly_fee
+        .checked_mul(initial_months as u64)
+        .ok_or(ErrorCode::CalculationOverflow)?;
+    let reward_fee_amount = monthly_fee_total
+        .checked_add(service_fee)
+        .ok_or(ErrorCode::CalculationOverflow)?; // Monthly fee + service fee → RewardPool
+    let platform_fee_amount = deployment_cost
+        .checked_div(1000)
+        .ok_or(ErrorCode::CalculationOverflow)?; // 0.1% of deployment_cost → PlatformPool
+    let total_payment = reward_fee_amount
+        .checked_add(platform_fee_amount)
         .ok_or(ErrorCode::CalculationOverflow)?;
 
     // Initialize deploy request with PendingDeployment status
@@ -269,16 +289,39 @@ pub fn create_deploy_request(
     user_stats.daily_deploys += 1;
     user_stats.total_deploys += 1;
 
-    // IMPORTANT: Credit fees to Reward Pool
-    // Note: Payment has already been transferred to Reward Pool PDA by developer (off-chain)
-    // We just need to update the state to track the balance
-    treasury_pool.credit_reward_pool(total_payment as u128)?;
+    // IMPORTANT: Credit fees to pools
+    // Note: Payment has already been transferred to pools by developer (off-chain):
+    // - monthlyFee (1% monthly) + serviceFee → RewardPool
+    // - deploymentPlatformFee (0.1% platform) → PlatformPool
+    // We just need to update the state to track the balances
     
-    // Verify Reward Pool PDA has received the payment
-    // This is a safety check - the actual transfer happened off-chain
+    // Credit fees to respective pools
+    treasury_pool.credit_reward_pool(reward_fee_amount as u128)?;
+    treasury_pool.credit_platform_pool(platform_fee_amount as u128)?;
+    
+    // Update reward_per_share if there are deposits
+    if treasury_pool.total_deposited > 0 {
+        // Only update reward_per_share for reward fees (not platform fees)
+        let reward_per_share_increment = (reward_fee_amount as u128)
+            .checked_mul(TreasuryPool::PRECISION)
+            .and_then(|x| x.checked_div(treasury_pool.total_deposited as u128))
+            .ok_or(ErrorCode::CalculationOverflow)?;
+        treasury_pool.reward_per_share = treasury_pool
+            .reward_per_share
+            .checked_add(reward_per_share_increment)
+            .ok_or(ErrorCode::CalculationOverflow)?;
+    }
+    
+    // Verify pools have received the payments
+    // This is a safety check - the actual transfers happened off-chain
     let reward_pool_lamports = ctx.accounts.reward_pool.lamports();
+    let platform_pool_lamports = ctx.accounts.platform_pool.lamports();
     require!(
         reward_pool_lamports >= treasury_pool.reward_pool_balance,
+        ErrorCode::InsufficientTreasuryFunds
+    );
+    require!(
+        platform_pool_lamports >= treasury_pool.platform_pool_balance,
         ErrorCode::InsufficientTreasuryFunds
     );
 

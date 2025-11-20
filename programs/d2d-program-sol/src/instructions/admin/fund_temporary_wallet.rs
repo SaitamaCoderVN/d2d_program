@@ -48,15 +48,18 @@ pub struct FundTemporaryWallet<'info> {
 /// Fund temporary wallet for deployment
 /// 
 /// Flow:
-/// 1. Determine source pool (Reward Pool by default, Admin Pool if specified)
-/// 2. Verify source pool has enough lamports
-/// 3. Transfer from source pool PDA -> temporary wallet (via lamport mutation)
-/// 4. Update pool balance in TreasuryPool state
+/// 1. Check TreasuryPool.liquid_balance >= deployment_cost
+/// 2. Transfer from Treasury Pool PDA -> temporary wallet (via lamport mutation)
+/// 3. Update liquid_balance in TreasuryPool state
+/// 
+/// NOTE: Funds sourced from TreasuryPool.liquid_balance (NOT RewardPool or PlatformPool)
+/// RewardPool is used exclusively for paying rewards to backers
+/// PlatformPool is used exclusively for admin operations (0.1% developer fees)
 pub fn fund_temporary_wallet(
     ctx: Context<FundTemporaryWallet>,
     _request_id: [u8; 32],
     amount: u64,
-    use_admin_pool: bool,
+    _use_admin_pool: bool, // Unused: always uses TreasuryPool.liquid_balance
 ) -> Result<()> {
     let treasury_pool = &mut ctx.accounts.treasury_pool;
     let deploy_request = &mut ctx.accounts.deploy_request;

@@ -2,7 +2,6 @@ use crate::errors::ErrorCode;
 use crate::events::RewardsClaimed;
 use crate::states::{LenderStake, TreasuryPool};
 use anchor_lang::prelude::*;
-use anchor_lang::system_program;
 
 /// Claim accumulated rewards (reward-per-share model)
 /// 
@@ -46,9 +45,8 @@ pub fn claim_rewards(ctx: Context<ClaimRewards>) -> Result<()> {
     msg!("[CLAIM] Starting claim_rewards instruction");
     msg!("[CLAIM] Lender: {}", ctx.accounts.lender.key());
     
-    // Get account info and bump before mutable borrows
+    // Get account info before mutable borrows
     let reward_pool_info = ctx.accounts.reward_pool.to_account_info();
-    let reward_pool_bump = ctx.accounts.treasury_pool.reward_pool_bump;
     
     let treasury_pool = &mut ctx.accounts.treasury_pool;
     let lender_stake = &mut ctx.accounts.lender_stake;
@@ -92,22 +90,20 @@ pub fn claim_rewards(ctx: Context<ClaimRewards>) -> Result<()> {
     treasury_pool.debit_reward_pool(claimable_rewards)?;
 
     // Transfer rewards from Reward Pool PDA -> lender
-    // Use PDA seeds for signing (program-owned account)
-    let reward_pool_seeds = &[
-        TreasuryPool::REWARD_POOL_SEED,
-        &[reward_pool_bump],
-    ];
-    let signer_seeds = &[&reward_pool_seeds[..]];
-    
-    let cpi_context = CpiContext::new_with_signer(
-        ctx.accounts.system_program.to_account_info(),
-        system_program::Transfer {
-            from: ctx.accounts.reward_pool.to_account_info(),
-            to: ctx.accounts.lender.to_account_info(),
-        },
-        signer_seeds,
-    );
-    system_program::transfer(cpi_context, claimable_rewards)?;
+    // CRITICAL: Use lamport mutation for program-owned accounts (not CPI System transfer)
+    // Reward Pool PDA may have data, so we cannot use System Program transfer
+    {
+        let lender_info = ctx.accounts.lender.to_account_info();
+        let mut reward_pool_lamports = reward_pool_info.try_borrow_mut_lamports()?;
+        let mut lender_lamports = lender_info.try_borrow_mut_lamports()?;
+
+        **reward_pool_lamports = (**reward_pool_lamports)
+            .checked_sub(claimable_rewards)
+            .ok_or(ErrorCode::CalculationOverflow)?;
+        **lender_lamports = (**lender_lamports)
+            .checked_add(claimable_rewards)
+            .ok_or(ErrorCode::CalculationOverflow)?;
+    }
 
     emit!(RewardsClaimed {
         lender: lender_stake.backer,
