@@ -189,4 +189,10 @@ pub mod d2d_program_sol {
     ) -> Result<()> {
         instructions::credit_fee_to_pool(ctx, fee_reward, fee_platform)
     }
+
+    /// Admin sync liquid_balance with actual account balance
+    /// This fixes liquid_balance when it's out of sync with account balance
+    pub fn sync_liquid_balance(ctx: Context<SyncLiquidBalance>) -> Result<()> {
+        instructions::sync_liquid_balance(ctx)
+    }
 }

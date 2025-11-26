@@ -2,6 +2,7 @@ use crate::errors::ErrorCode;
 use crate::events::{DeploymentConfirmed, DeploymentFailed};
 use crate::states::{DeployRequest, DeployRequestStatus, TreasuryPool};
 use anchor_lang::prelude::*;
+use anchor_lang::system_program;
 
 #[derive(Accounts)]
 pub struct ConfirmDeployment<'info> {
@@ -25,9 +26,9 @@ pub struct ConfirmDeployment<'info> {
     )]
     pub admin: Signer<'info>,
     
-    /// CHECK: Ephemeral key that received deployment funds
+    /// CHECK: Ephemeral key that received deployment funds (must be signer for transfer)
     #[account(mut)]
-    pub ephemeral_key: UncheckedAccount<'info>,
+    pub ephemeral_key: Signer<'info>,
     
     /// CHECK: Developer wallet for refund if deployment fails
     #[account(mut)]
@@ -109,20 +110,25 @@ pub fn confirm_deployment_success(
     };
 
     if actual_recovered > 0 {
-        // Transfer recovered funds back to Treasury Pool PDA via lamport mutation
+        // Transfer recovered funds back to Treasury Pool PDA via CPI System Program transfer
         // CRITICAL: Recovered funds go to TreasuryPool (liquid_balance), NOT PlatformPool
         // PlatformPool only receives 0.1% developer fees, not operational funds
-        {
-            let mut treasury_lamports = treasury_pda_info.try_borrow_mut_lamports()?;
-            let mut ephemeral_lamports = ephemeral_key_info.try_borrow_mut_lamports()?;
-
-            **treasury_lamports = (**treasury_lamports)
-                .checked_add(actual_recovered)
-                .ok_or(ErrorCode::CalculationOverflow)?;
-            **ephemeral_lamports = (**ephemeral_lamports)
-                .checked_sub(actual_recovered)
-                .ok_or(ErrorCode::CalculationOverflow)?;
-        }
+        // Note: ephemeral_key must be a signer for this transfer
+        let treasury_seeds = &[
+            TreasuryPool::PREFIX_SEED,
+            &[treasury_pool.bump],
+        ];
+        let signer_seeds = &[&treasury_seeds[..]];
+        
+        // Use CPI System Program transfer from ephemeral_key to treasury_pda
+        let cpi_context = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ephemeral_key_info,
+                to: treasury_pda_info,
+            },
+        );
+        system_program::transfer(cpi_context, actual_recovered)?;
 
         // Update liquid_balance (recovered funds are available for withdrawals)
         // This is the correct place for recovered deployment funds

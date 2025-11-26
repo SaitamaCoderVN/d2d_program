@@ -9,6 +9,7 @@ pub mod fund_temporary_wallet;
 pub mod reinitialize_treasury_pool;
 pub mod reset_treasury_pool;
 pub mod suspend_expired_programs;
+pub mod sync_liquid_balance;
 pub mod update_apy;
 
 pub use admin_withdraw::*;
@@ -22,4 +23,5 @@ pub use fund_temporary_wallet::*;
 pub use reinitialize_treasury_pool::*;
 pub use reset_treasury_pool::*;
 pub use suspend_expired_programs::*;
+pub use sync_liquid_balance::*;
 pub use update_apy::*;
