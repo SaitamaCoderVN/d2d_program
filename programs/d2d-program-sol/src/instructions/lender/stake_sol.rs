@@ -127,6 +127,42 @@ pub fn stake_sol(ctx: Context<StakeSol>, deposit_amount: u64, _lock_period: i64)
     // NO FEES TAKEN FROM BACKER - 100% goes to TreasuryPool
     // Fees come from developers when they pay for deployments (borrowed_amount * 1% monthly)
 
+    // Handle excess rewards: If fees were credited before any deposits,
+    // we need to distribute those excess rewards proportionally to all backers
+    // This ensures backers receive 1-1.2% returns when their SOL is fully utilized
+    let total_deposited_before = treasury_pool.total_deposited;
+    if total_deposited_before == 0 && treasury_pool.reward_pool_balance > 0 {
+        // There are excess rewards (fees credited before any deposits)
+        // Distribute them proportionally based on the new total deposits after this stake
+        let excess_rewards = treasury_pool.reward_pool_balance;
+        let new_total_deposited = deposit_amount;
+        
+        // reward_per_share = excess_rewards * PRECISION / new_total_deposited
+        // This ensures the first backer(s) receive excess rewards proportionally
+        let excess_reward_per_share = (excess_rewards as u128)
+            .checked_mul(TreasuryPool::PRECISION)
+            .ok_or(ErrorCode::CalculationOverflow)?
+            .checked_div(new_total_deposited as u128)
+            .ok_or(ErrorCode::CalculationOverflow)?;
+        
+        msg!("[STAKE] Excess rewards detected: {} lamports", excess_rewards);
+        msg!("[STAKE] Calculating reward_per_share from excess: {}", excess_reward_per_share);
+        msg!("[STAKE] New total deposited: {} lamports", new_total_deposited);
+        
+        // Add excess reward_per_share to current reward_per_share
+        treasury_pool.reward_per_share = treasury_pool
+            .reward_per_share
+            .checked_add(excess_reward_per_share)
+            .ok_or(ErrorCode::CalculationOverflow)?;
+        
+        msg!("[STAKE] Updated reward_per_share to: {}", treasury_pool.reward_per_share);
+    } else if total_deposited_before > 0 && treasury_pool.reward_pool_balance > 0 {
+        // Check if there are still excess rewards (reward_pool_balance > total claimable)
+        // This can happen if fees were credited when total_deposited was lower
+        // For now, we let the normal credit_fee_to_pool logic handle this
+        // Future deposits will benefit from accumulated reward_per_share
+    }
+
     // Update deposit amount (100% of deposit_amount)
     lender_stake.deposited_amount = lender_stake
         .deposited_amount

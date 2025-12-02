@@ -1,4 +1,5 @@
 pub mod admin_withdraw;
+pub mod admin_withdraw_reward_pool;
 pub mod close_program_and_refund;
 pub mod close_treasury_pool;
 pub mod confirm_deployment;
@@ -13,6 +14,7 @@ pub mod sync_liquid_balance;
 pub mod update_apy;
 
 pub use admin_withdraw::*;
+pub use admin_withdraw_reward_pool::*;
 pub use close_program_and_refund::*;
 pub use close_treasury_pool::*;
 pub use confirm_deployment::*;

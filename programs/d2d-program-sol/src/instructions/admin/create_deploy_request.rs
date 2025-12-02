@@ -4,6 +4,8 @@ use crate::states::{DeployRequest, DeployRequestStatus, TreasuryPool, UserDeploy
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use anchor_lang::solana_program::rent::Rent;
+#[allow(deprecated)]
+use anchor_lang::solana_program::system_instruction;
 
 /// Create deploy request after payment verification
 /// Only backend admin can call this instruction
@@ -80,54 +82,100 @@ pub fn create_deploy_request(
     let current_time = Clock::get()?.unix_timestamp;
     
     // Handle deploy_request account (may have old layout)
+    let program_id = ctx.program_id;
     let required_space = 8 + DeployRequest::INIT_SPACE;
     let current_space = deploy_request_info.data_len();
     let is_new_account = current_space == 0;
     
+    // Check if account exists and verify owner
+    if !is_new_account {
+        // Account exists - verify it's owned by this program
+        require!(
+            deploy_request_info.owner == program_id,
+            ErrorCode::InvalidAccountOwner
+        );
+        msg!("[CREATE_DEPLOY_REQUEST] Account exists ({} bytes), owner verified: {}", current_space, deploy_request_info.owner);
+    }
+    
     // Initialize account if new
     if is_new_account {
+        msg!("[CREATE_DEPLOY_REQUEST] Initializing new deploy_request account ({} bytes)", required_space);
         let rent = Rent::get()?;
         let lamports_required = rent.minimum_balance(required_space);
-        // Transfer lamports from admin to deploy_request account via CPI
-        let transfer_cpi = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.admin.to_account_info(),
-                to: deploy_request_info.clone(),
-            },
+        
+        // For new PDA accounts, we need to create them with the correct size from the start
+        // Use System Program's create_account instruction with PDA seeds as signer
+        // This creates the account with correct size and assigns ownership in one step
+        let deploy_request_seeds = &[
+            DeployRequest::PREFIX_SEED,
+            program_hash.as_ref(),
+            &[ctx.bumps.deploy_request],
+        ];
+        let signer_seeds = &[&deploy_request_seeds[..]];
+        
+        // Create account instruction - creates PDA account with correct size
+        let create_account_ix = system_instruction::create_account(
+            ctx.accounts.admin.key,      // from (funding account - admin pays for rent)
+            deploy_request_info.key,     // to (PDA account to create)
+            lamports_required,           // lamports (rent exemption)
+            required_space as u64,       // space (account size)
+            &program_id,                 // owner (our program)
         );
-        system_program::transfer(transfer_cpi, lamports_required)?;
-        deploy_request_info.realloc(required_space, false)?;
+        
+        // Invoke with PDA seeds as signer
+        // This allows the PDA to sign the transaction even though it doesn't exist yet
+        anchor_lang::solana_program::program::invoke_signed(
+            &create_account_ix,
+            &[
+                ctx.accounts.admin.to_account_info(),
+                deploy_request_info.clone(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            signer_seeds,
+        )?;
+        
+        // Zero out the data
         let mut data = deploy_request_info.try_borrow_mut_data()?;
         data[..].fill(0);
-    } else if current_space < required_space {
-        // Resize account if old layout - need to add lamports for rent exemption
-        msg!("[CREATE_DEPLOY_REQUEST] Resizing deploy_request from {} to {} bytes", current_space, required_space);
-        
-        let rent = Rent::get()?;
-        let current_rent = rent.minimum_balance(current_space);
-        let new_rent = rent.minimum_balance(required_space);
-        let additional_lamports_needed = new_rent
-            .checked_sub(current_rent)
-            .ok_or(ErrorCode::CalculationOverflow)?;
-        
-        msg!("[CREATE_DEPLOY_REQUEST] Current rent: {} lamports, New rent: {} lamports", current_rent, new_rent);
-        msg!("[CREATE_DEPLOY_REQUEST] Additional lamports needed: {} lamports", additional_lamports_needed);
-        
-        // Transfer additional lamports from admin to deploy_request account via CPI
-        let transfer_cpi = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.admin.to_account_info(),
-                to: deploy_request_info.clone(),
-            },
-        );
-        system_program::transfer(transfer_cpi, additional_lamports_needed)?;
-        
-        deploy_request_info.realloc(required_space, false)?;
-        // Zero out the new portion
-        let mut data = deploy_request_info.try_borrow_mut_data()?;
-        data[current_space..].fill(0);
+    } else if current_space != required_space {
+        // Account exists but size doesn't match - need to resize
+        if current_space < required_space {
+            // Need to grow the account
+            msg!("[CREATE_DEPLOY_REQUEST] Growing account from {} to {} bytes", current_space, required_space);
+            
+            let rent = Rent::get()?;
+            let current_rent = rent.minimum_balance(current_space);
+            let new_rent = rent.minimum_balance(required_space);
+            let additional_lamports_needed = new_rent
+                .checked_sub(current_rent)
+                .ok_or(ErrorCode::CalculationOverflow)?;
+            
+            msg!("[CREATE_DEPLOY_REQUEST] Additional lamports needed: {}", additional_lamports_needed);
+            
+            // Transfer additional lamports if needed
+            if additional_lamports_needed > 0 {
+                let transfer_cpi = CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    system_program::Transfer {
+                        from: ctx.accounts.admin.to_account_info(),
+                        to: deploy_request_info.clone(),
+                    },
+                );
+                system_program::transfer(transfer_cpi, additional_lamports_needed)?;
+            }
+            
+            // Resize (we already verified owner is program)
+            // Using realloc for now (deprecated but still works)
+            #[allow(deprecated)]
+            deploy_request_info.realloc(required_space, false)?;
+            
+            // Zero out the new portion
+            let mut data = deploy_request_info.try_borrow_mut_data()?;
+            data[current_space..].fill(0);
+        } else {
+            // Account is larger than needed - this is OK, just use what we need
+            msg!("[CREATE_DEPLOY_REQUEST] Account size {} is larger than required {}, using existing size", current_space, required_space);
+        }
     }
     
     // Deserialize deploy_request (will work after resize/init)

@@ -11,7 +11,7 @@ pub use events::*;
 use instructions::*;
 pub use states::*;
 
-declare_id!("Hn6enqRbfjQywqVbkNNFe6rauWjQLvea8Fyh6fZZPpA8");
+declare_id!("3RpgvJ1YGzcZfCKnUUsAzZcWrsTcMCeEqtNHvr6juGht");
 
 #[program]
 pub mod d2d_program_sol {
@@ -154,6 +154,15 @@ pub mod d2d_program_sol {
         reason: String,
     ) -> Result<()> {
         instructions::admin_withdraw(ctx, amount, reason)
+    }
+
+    /// Admin withdraw funds from Reward Pool
+    pub fn admin_withdraw_reward_pool(
+        ctx: Context<AdminWithdrawRewardPool>,
+        amount: u64,
+        reason: String,
+    ) -> Result<()> {
+        instructions::admin_withdraw_reward_pool(ctx, amount, reason)
     }
 
     /// Close Treasury Pool account (Admin only)

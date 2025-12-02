@@ -60,4 +60,6 @@ pub enum ErrorCode {
     DivisionByZero,
     #[msg("Invalid withdrawal request")]
     InvalidWithdrawalRequest,
+    #[msg("Invalid account owner - account must be owned by this program")]
+    InvalidAccountOwner,
 }
